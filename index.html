@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini Voice Agent - Conversational S2S</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for modern aesthetics and feedback */
+        body {
+            font-family: 'Inter', sans-serif;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #f0f4f8 0%, #d9e2ec 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .container {
+            max-width: 800px;
+            width: 95%;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+        }
+        #mic-button {
+            transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+            font-size: 1.5rem;
+            height: 90px;
+            width: 90px;
+            border: 4px solid white;
+            position: relative;
+            z-index: 10;
+        }
+        /* State Indicators */
+        #mic-button.idle { background-color: #3b82f6; } /* Blue */
+        #mic-button.listening { background-color: #10b981; animation: pulse-green 1.5s infinite; } /* Green */
+        #mic-button.recording { background-color: #ef4444; animation: pulse-red 1.5s infinite; } /* Red */
+        #mic-button.processing { background-color: #9ca3af; cursor: progress; } /* Gray */
+
+        #mic-button:disabled {
+            cursor: not-allowed;
+            animation: none !important;
+        }
+
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 20px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { box-shadow: 0 0 0 20px rgba(16, 185, 129, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+
+        /* Chat History Styling */
+        #chat-history {
+            scroll-behavior: smooth;
+        }
+        .chat-message {
+            border-radius: 1.5rem;
+            padding: 0.75rem 1.25rem;
+            max-width: 85%;
+            font-size: 0.95rem;
+            line-height: 1.4;
+            animation: fade-in 0.3s ease-out;
+        }
+        .user-message {
+            background-color: #3b82f6; /* Blue for user */
+            color: white;
+            border-bottom-right-radius: 0.5rem;
+            margin-left: auto;
+        }
+        .agent-message {
+            background-color: #ffffff; /* White for agent */
+            color: #1f2937;
+            border: 1px solid #e5e7eb;
+            border-bottom-left-radius: 0.5rem;
+        }
+        @keyframes fade-in {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="p-4">
+
+    <div class="container bg-white rounded-3xl p-6 md:p-10 my-8">
+        <header class="text-center mb-6">
+            <h1 class="text-4xl font-extrabold text-gray-800 mb-1">
+                Voice Agent
+            </h1>
+            <p class="text-sm text-gray-500">
+                Speech-to-Speech Conversation Powered by Gemini
+            </p>
+        </header>
+
+        <div id="chat-history" class="h-[400px] overflow-y-auto mb-6 p-4 border border-gray-200 rounded-xl bg-gray-50 flex flex-col space-y-4">
+            <!-- Messages will appear here -->
+        </div>
+
+        <div class="flex flex-col items-center space-y-4">
+            <button id="mic-button"
+                    class="rounded-full text-white flex items-center justify-center shadow-2xl transition-colors"
+                    title="Click to start conversation"
+                    disabled>
+                <!-- Mic Icon (Lucide icon equivalent) -->
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-mic">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                    <line x1="12" x2="12" y1="19" y2="22"/>
+                </svg>
+            </button>
+            <p id="status" class="text-base font-medium text-gray-600 h-6">
+                Initializing...
+            </p>
+            <div id="error-message" class="text-sm text-red-600 mt-2 font-mono"></div>
+        </div>
+    </div>
+
+    <!-- Hidden audio player for TTS output -->
+    <audio id="audio-playback" style="display: none;"></audio>
+
+    <script>
+        // --- Configuration and API Setup ---
+        // Your provided API Key has been inserted below:
+        const API_KEY = "AIzaSyDt-qi787vpcWXNVcEOcMi1awJyFKYTsnk"; 
+        // STT (Speech-to-Text) and Chat/Reasoning Model
+        const FLASH_MODEL = 'gemini-2.5-flash-preview-09-2025';
+        // TTS (Text-to-Speech) Model - CORRECTED
+        const TTS_MODEL = 'gemini-2.5-flash-preview-tts';
+        const TTS_VOICE = 'Kore'; 
+
+        // --- DOM Elements ---
+        const micButton = document.getElementById('mic-button');
+        const statusElement = document.getElementById('status');
+        const errorElement = document.getElementById('error-message');
+        const chatHistory = document.getElementById('chat-history');
+        const audioPlayback = document.getElementById('audio-playback');
+
+        // --- State Variables ---
+        let mediaRecorder;
+        let audioChunks = [];
+        let stream;
+        let isRecording = false;
+        let isProcessing = false;
+        let audioContext;
+        let analyser;
+        let micInput;
+        // The conversation history maintains context for the chat model
+        let conversationHistory = [];
+
+        // VAD (Voice Activity Detection) Parameters
+        const VAD_THRESHOLD = 0.05; // RMS threshold for voice detection
+        const SILENCE_DURATION_MS = 1500; // Time (in ms) of silence to stop recording
+        const SAMPLE_RATE = 16000; // Required sample rate for Gemini STT
+
+        // --- Utility Functions ---
+
+        // Exponential backoff for API calls
+        async function exponentialBackoffFetch(url, options, retries = 5, delay = 1000) {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) {
+                        return response;
+                    }
+                    if (response.status === 429) { // Rate limit
+                        await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+                        continue;
+                    }
+                    // Handle 403 Forbidden specifically for the user's report
+                    if (response.status === 403) {
+                        const errorData = await response.json().catch(() => ({}));
+                        throw new Error(`API returned 403 Forbidden. This usually means the API key is invalid or lacks necessary permissions. Details: ${JSON.stringify(errorData)}`);
+                    }
+                    // Handle 400 Bad Request with more details
+                    if (response.status === 400) {
+                        const errorData = await response.json().catch(() => ({}));
+                        throw new Error(`API returned 400 Bad Request. Details: ${JSON.stringify(errorData)}`);
+                    }
+                    throw new Error(`API returned status ${response.status}: ${response.statusText}`);
+                } catch (error) {
+                    if (i === retries - 1) throw error;
+                    await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+                }
+            }
+        }
+
+        /**
+         * Converts Base64 string to ArrayBuffer.
+         */
+        function base64ToArrayBuffer(base64) {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        /**
+         * Converts 16-bit PCM audio data (returned by TTS) to a standard WAV Blob for playback.
+         */
+        function pcmToWav(pcm16, sampleRate) {
+            const numChannels = 1;
+            const bytesPerSample = 2; 
+            const numSamples = pcm16.length;
+            const dataSize = numSamples * bytesPerSample;
+            const buffer = new ArrayBuffer(44 + dataSize);
+            const view = new DataView(buffer);
+
+            let offset = 0;
+            function writeString(str) {
+                for (let i = 0; i < str.length; i++) { view.setUint8(offset++, str.charCodeAt(i)); }
+            }
+            function writeUint32(value) {
+                view.setUint32(offset, value, true);
+                offset += 4;
+            }
+            function writeUint16(value) {
+                view.setUint16(offset, value, true);
+                offset += 2;
+            }
+
+            // RIFF chunk
+            writeString('RIFF'); writeUint32(36 + dataSize);
+            writeString('WAVE');
+
+            // FMT chunk
+            writeString('fmt '); writeUint32(16);
+            writeUint16(1); writeUint16(numChannels);
+            writeUint32(sampleRate);
+            writeUint32(sampleRate * numChannels * bytesPerSample);
+            writeUint16(numChannels * bytesPerSample);
+            writeUint16(bytesPerSample * 8);
+
+            // DATA chunk
+            writeString('data'); writeUint32(dataSize);
+
+            // Write PCM data
+            for (let i = 0; i < numSamples; i++) {
+                view.setInt16(offset, pcm16[i], true);
+                offset += 2;
+            }
+
+            return new Blob([buffer], { type: 'audio/wav' });
+        }
+
+        // --- UI Functions ---
+
+        /**
+         * Updates the status text and the button's visual state.
+         * @param {string} text The status text to display.
+         * @param {'listening' | 'recording' | 'idle' | 'processing'} state The state to set.
+         */
+        function updateStatus(text, state) {
+            statusElement.textContent = text;
+            errorElement.textContent = ''; // Clear error on status change
+            micButton.className = 'rounded-full text-white flex items-center justify-center shadow-2xl transition-colors';
+            micButton.classList.add(state);
+            micButton.disabled = isProcessing || (state === 'recording'); 
+            
+            if (state === 'idle') {
+                micButton.disabled = false;
+            } else if (state === 'processing') {
+                 micButton.disabled = true;
+            }
+        }
+        
+        /**
+         * Adds a message to the chat history UI.
+         */
+        function appendMessage(sender, text) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `chat-message shadow-md ${sender === 'user' ? 'user-message' : 'agent-message'}`;
+            messageDiv.textContent = text;
+
+            const containerDiv = document.createElement('div');
+            // Add margin top to separate consecutive messages
+            containerDiv.className = `flex ${sender === 'user' ? 'justify-end' : 'justify-start'} mt-4`; 
+            containerDiv.appendChild(messageDiv);
+
+            chatHistory.appendChild(containerDiv);
+            chatHistory.scrollTop = chatHistory.scrollHeight; // Scroll to bottom
+        }
+
+        /**
+         * Shows a critical error message.
+         */
+        function showFatalError(message) {
+            statusElement.textContent = "FATAL ERROR";
+            errorElement.textContent = message;
+            micButton.disabled = true;
+            micButton.classList.remove('listening', 'recording', 'idle');
+            micButton.classList.add('processing'); // Use processing style for disabled error state
+        }
+
+
+        // --- Audio Recording and VAD Logic ---
+
+        /**
+         * Initializes microphone access and VAD setup.
+         */
+        async function startListening() {
+            if (isRecording || isProcessing) return;
+
+            updateStatus('Requesting mic permissions...', 'processing');
+
+            if (API_KEY === "") {
+                showFatalError("CRITICAL: API_KEY is not set. Please update the script.");
+                return;
+            }
+
+            try {
+                // Get microphone stream
+                stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: SAMPLE_RATE,
+                        channelCount: 1,
+                        echoCancellation: true,
+                    }
+                });
+
+                // Set up AudioContext for VAD (Volume Monitoring)
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+                micInput = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+                micInput.connect(analyser);
+
+                // Set up MediaRecorder for capturing audio chunks
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: 'audio/webm; codecs=opus'
+                });
+
+                mediaRecorder.ondataavailable = event => {
+                    audioChunks.push(event.data);
+                };
+
+                // CRITICAL: The main loop is triggered when recording stops.
+                mediaRecorder.onstop = conversationLoop; 
+
+                updateStatus('Ready. Click to record your question.', 'idle');
+
+            } catch (error) {
+                console.error('Microphone access denied or failed:', error);
+                showFatalError('Microphone Access Error: ' + error.message);
+            }
+        }
+
+        let vadInterval;
+        let lastVoiceTime = 0;
+
+        /**
+         * Starts audio recording and the VAD monitoring loop.
+         */
+        function startRecording() {
+            if (isRecording || isProcessing) return;
+            
+            // Re-initialize state for a new turn
+            audioChunks = [];
+            isRecording = true;
+            
+            mediaRecorder.start();
+            
+            updateStatus('Recording... (Speak now)', 'recording');
+            
+            lastVoiceTime = performance.now();
+            
+            // Start the VAD monitoring loop
+            vadInterval = requestAnimationFrame(monitorVAD);
+        }
+
+        /**
+         * Stops recording and clears VAD state.
+         */
+        function stopRecording() {
+            if (!isRecording) return;
+            
+            isRecording = false;
+            cancelAnimationFrame(vadInterval);
+            
+            if (mediaRecorder.state !== 'inactive') {
+                // This triggers mediaRecorder.onstop, which calls conversationLoop
+                mediaRecorder.stop(); 
+            }
+            
+            updateStatus('Processing audio...', 'processing');
+        }
+
+        /**
+         * VAD monitoring loop (runs via requestAnimationFrame)
+         */
+        function monitorVAD() {
+            if (!isRecording || !analyser) {
+                cancelAnimationFrame(vadInterval);
+                return;
+            }
+
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            analyser.getByteTimeDomainData(dataArray);
+
+            // Simple RMS calculation for volume
+            let sumOfSquares = 0;
+            for (let i = 0; i < bufferLength; i++) {
+                const value = (dataArray[i] / 128.0) - 1.0;
+                sumOfSquares += value * value;
+            }
+            const rms = Math.sqrt(sumOfSquares / bufferLength);
+
+            const currentTime = performance.now();
+
+            if (rms > VAD_THRESHOLD) {
+                // Voice detected, reset silence timer
+                lastVoiceTime = currentTime;
+                updateStatus('Recording... (Voice Detected)', 'recording');
+            } else {
+                // Silence detected, check duration
+                if (currentTime - lastVoiceTime > SILENCE_DURATION_MS) {
+                    // Silence exceeds threshold, stop recording
+                    stopRecording();
+                    return; // Exit loop
+                }
+            }
+
+            vadInterval = requestAnimationFrame(monitorVAD);
+        }
+
+        // --- API Call Functions ---
+
+        /**
+         * Transcribes the recorded audio chunk using Gemini STT.
+         */
+        async function transcribeAudio() {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            // Convert Blob to Base64 string for inline data API call
+            const base64Audio = await new Promise(resolve => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                reader.readAsDataURL(audioBlob);
+            });
+
+            updateStatus('1/3: Transcribing speech (STT)...', 'processing');
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${FLASH_MODEL}:generateContent?key=${API_KEY}`;
+
+            const payload = {
+                contents: [{
+                    parts: [
+                        {
+                            text: "Transcribe the audio provided and provide only the text of the transcription. Do not add any extra commentary or punctuation."
+                        },
+                        {
+                            inlineData: {
+                                mimeType: 'audio/webm',
+                                data: base64Audio
+                            }
+                        }
+                    ]
+                }]
+            };
+
+            const response = await exponentialBackoffFetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+            const transcription = result.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "Could not transcribe audio.";
+            return transcription;
+        }
+
+        /**
+         * Gets a chat response from Gemini using the conversation history.
+         */
+        async function generateChatResponse(userText) {
+            updateStatus('2/3: Generating text response (Chat)...', 'processing');
+
+            conversationHistory.push({ role: 'user', parts: [{ text: userText }] });
+
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${FLASH_MODEL}:generateContent?key=${API_KEY}`;
+
+            const payload = {
+                contents: conversationHistory,
+                systemInstruction: {
+                    parts: [{ text: "You are a friendly, conversational AI assistant named Orion. Keep your responses concise, helpful, and engage in continuous conversation." }]
+                }
+            };
+
+            const response = await exponentialBackoffFetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+            const agentText = result.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "I'm sorry, I couldn't generate a text response.";
+
+            conversationHistory.push({ role: 'model', parts: [{ text: agentText }] });
+            return agentText;
+        }
+
+        /**
+         * Converts text to speech using Gemini TTS and plays it.
+         */
+        async function generateTTS(text) {
+            updateStatus('3/3: Converting text to speech (TTS)...', 'processing');
+
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${API_KEY}`;
+
+            const payload = {
+                contents: [{ parts: [{ text: text }] }],
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: TTS_VOICE }
+                        }
+                    }
+                }
+            };
+
+            const response = await exponentialBackoffFetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+            const part = result?.candidates?.[0]?.content?.parts?.[0];
+            const audioData = part?.inlineData?.data;
+            const mimeType = part?.inlineData?.mimeType;
+
+            if (!audioData || !mimeType) {
+                throw new Error("TTS API returned no audio data.");
+            }
+
+            // The TTS API returns audio/L16;rate=X. Extract the rate.
+            const rateMatch = mimeType.match(/rate=(\d+)/);
+            const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+
+            // Decode Base64 to ArrayBuffer
+            const arrayBuffer = base64ToArrayBuffer(audioData);
+            
+            // Convert to Int16Array (PCM 16-bit)
+            const pcm16 = new Int16Array(arrayBuffer);
+
+            // Convert PCM to WAV Blob
+            const wavBlob = pcmToWav(pcm16, sampleRate);
+
+            // Create object URL and play
+            const audioUrl = URL.createObjectURL(wavBlob);
+            audioPlayback.src = audioUrl;
+            
+            updateStatus('Playing agent response...', 'processing');
+            
+            return new Promise((resolve, reject) => {
+                audioPlayback.onended = () => {
+                    URL.revokeObjectURL(audioUrl);
+                    resolve();
+                };
+                audioPlayback.onerror = (error) => {
+                    URL.revokeObjectURL(audioUrl);
+                    reject(error);
+                };
+                audioPlayback.play().catch(reject);
+            });
+        }
+
+        // --- Main Conversation Loop ---
+
+        /**
+         * The core conversation loop: STT -> Chat -> TTS -> Reset
+         * This function is called automatically when recording stops.
+         */
+        async function conversationLoop() {
+            isProcessing = true;
+
+            try {
+                // Step 1: Transcribe user speech
+                const userText = await transcribeAudio();
+                console.log('User said:', userText);
+                appendMessage('user', userText);
+
+                // Step 2: Generate AI response
+                const agentText = await generateChatResponse(userText);
+                console.log('Agent responds:', agentText);
+                appendMessage('agent', agentText);
+
+                // Step 3: Convert response to speech and play
+                await generateTTS(agentText);
+
+                // Step 4: Reset to listening state
+                isProcessing = false;
+                updateStatus('Ready. Click to continue conversation.', 'idle');
+
+            } catch (error) {
+                console.error('Error in conversation loop:', error);
+                errorElement.textContent = `Error: ${error.message}`;
+                isProcessing = false;
+                updateStatus('Error occurred. Click to try again.', 'idle');
+            }
+        }
+
+        // --- Event Listeners ---
+
+        /**
+         * Button click handler: starts recording when clicked
+         */
+        micButton.addEventListener('click', () => {
+            if (!isProcessing && !isRecording) {
+                startRecording();
+            }
+        });
+
+        // --- Initialization ---
+
+        /**
+         * Initialize the application on page load
+         */
+        window.addEventListener('load', async () => {
+            await startListening();
+        });
+
+    </script>
+
+</body>
+</html>
